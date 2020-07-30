@@ -1,0 +1,288 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Stop and Start EC2 instances
+Parameters:
+
+     
+  EnvironmentTag:
+    Default: tst
+    Description: Tag resources with environment name for easy filtering
+    Type: String
+    AllowedValues:
+      - 'tst'
+      - 'hlg'
+      - 'prd'
+
+  SetupTag:
+    Description: Setup name to be shared across master-slave regions
+    Default: jaf
+    Type: String
+  
+  S3BucketDeploy:
+    Description: Bucket where the lambdas are
+    Default: jaf-deploy
+    Type: String
+
+  S3BucketArtifactory:
+    Description: Bucket where the Artifacts/Libs are
+    Default: jaf-artifactory
+    Type: String
+
+Mappings:
+
+  RegionShortCode:
+    us-east-1:
+      value: nvi
+    us-east-2:
+      value: ohi
+    us-west-1:
+      value: nca
+    us-west-2:
+      value: ore
+    eu-west-1: 
+      value: ire
+    eu-central-1:
+      value: fkt
+    ap-northeast-1:
+      value: tko
+    ap-northeast-2:
+      value: seo
+    ap-southeast-1:
+      value: sgo
+    ap-southeast-2:
+      value: syd
+    ap-south-1:
+      value: mmb
+    sa-east-1:
+      value: spo
+    cn-north-1:
+      value: bjg
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Setup Environment
+        Parameters:
+          - EnvironmentTag
+          - SetupTag
+          - S3BucketDeploy
+          - S3BucketArtifactory
+      
+Resources:
+
+  CodeBuildServiceFrameworkProject:
+    Type: AWS::CodeBuild::Project
+    DependsOn: CodeBuildRole
+    Properties:
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:3.0
+        Type: LINUX_CONTAINER
+        PrivilegedMode: true
+      Name: !Join
+        - '-'
+        - - !FindInMap [ RegionShortCode, !Ref 'AWS::Region', value ]
+          - !Ref 'EnvironmentTag'
+          - !Ref 'SetupTag'
+          - serviceframework
+      ServiceRole: !Ref CodeBuildRole
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Join
+        - '-'
+        - - !FindInMap [ RegionShortCode, !Ref 'AWS::Region', value ]
+          - !Ref 'EnvironmentTag'
+          - !Ref 'SetupTag'
+          - codebuild
+          Status: ENABLED
+          StreamName: !Join
+        - '-'
+        - - !FindInMap [ RegionShortCode, !Ref 'AWS::Region', value ]
+          - !Ref 'EnvironmentTag'
+          - !Ref 'SetupTag'
+          - serviceframework
+      Source:
+        Type: BITBUCKET
+        Location: 'https://bitbucket.org/company/serviceframework'
+        GitSubmodulesConfig:
+          FetchSubmodules: false
+      Triggers:
+        Webhook: true
+        FilterGroups:
+          - - Type: EVENT
+              Pattern: PULL_REQUEST_MERGED
+
+  CodeBuildRole:
+    Description: Creating service role in IAM for AWS CodeBuild
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+      Path: /
+      RoleName: !Join
+        - '-'
+        - - !FindInMap [ RegionShortCode, !Ref 'AWS::Region', value ]
+          - !Ref 'EnvironmentTag'
+          - !Ref 'SetupTag'
+          - codebuild-role
+    Type: AWS::IAM::Role
+
+  CodeBuildPolicy:
+    Type: AWS::IAM::Policy
+    Description: Setting IAM policy for service role for CodeBuild
+    Properties:
+      PolicyName: !Join
+        - '-'
+        - - !FindInMap [ RegionShortCode, !Ref 'AWS::Region', value ]
+          - !Ref 'EnvironmentTag'
+          - !Ref 'SetupTag'
+          - codebuild-policy 
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Action:
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+          Effect: Allow
+          Resource: '*'
+        - Action:
+          - s3:PutObject
+          - s3:GetObject
+          - s3:GetObjectVersion
+          - s3:GetBucketLocation
+          Effect: Allow
+          Resource:
+          - !Join
+            - ''
+            - - 'arn:aws:s3:::'
+              - !Ref 'S3BucketDeploy'
+          - !Join
+            - ''
+            - - 'arn:aws:s3:::'
+              - !Ref 'S3BucketDeploy'
+              - /*
+          - !Join
+            - ''
+            - - 'arn:aws:s3:::'
+              - !Ref 'S3BucketArtifactory'
+          - !Join
+            - ''
+            - - 'arn:aws:s3:::'
+              - !Ref 'S3BucketArtifactory'
+              - /*
+        - Action:
+          - ssm:Get*
+          Effect: Allow
+          Resource:
+          - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/git-user"
+          - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/git-pass"
+          - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/artifactory-user"
+          - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/artifactory-pass"
+          - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/codebuild-ssh-key"
+      Roles:
+      - !Ref 'CodeBuildRole'
+    DependsOn: CodeBuildRole
+
+  IamRoleLambdaExecution:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join
+        - '-'
+        - - !FindInMap [ RegionShortCode, !Ref 'AWS::Region', value ]
+          - !Ref 'EnvironmentTag'
+          - !Ref 'SetupTag'
+          - codebuild-lambda-role    
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: '/'
+
+  IamPolicyLambdaExecution:
+    Type: AWS::IAM::Policy
+    DependsOn: IamRoleLambdaExecution
+    Properties:
+      PolicyName: !Join
+        - '-'
+        - - !FindInMap [ RegionShortCode, !Ref 'AWS::Region', value ]
+          - !Ref 'EnvironmentTag'
+          - !Ref 'SetupTag'
+          - codebuild-lambda-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+            - logs:*
+          Resource: '*'
+      Roles:
+      - Ref: IamRoleLambdaExecution
+
+  SlackFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join
+        - '-'
+        - - !FindInMap [ RegionShortCode, !Ref 'AWS::Region', value ]
+          - !Ref 'EnvironmentTag'
+          - !Ref 'SetupTag'
+          - codebuild-slack-notification    
+      Handler: slack.handler
+      Timeout: 5
+      Role:
+        Fn::GetAtt:
+          - IamRoleLambdaExecution
+          - Arn
+      Code:
+        S3Bucket: !Ref 'S3BucketDeploy'
+        S3Key: 'lambdas/slack-js-1.1.zip'
+      Runtime: nodejs12.x
+      Environment:
+        Variables:
+          SLACK_HOOK_URL: 'https://hooks.slack.com/services/slack-service'
+
+  BuildEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: !Join
+        - '-'
+        - - !FindInMap [ RegionShortCode, !Ref 'AWS::Region', value ]
+          - !Ref 'EnvironmentTag'
+          - !Ref 'SetupTag'
+          - codebuild-event-rule
+      Description: 'BuildEventRule'
+      EventPattern:
+        source:
+          - 'aws.codebuild'
+        detail-type:
+          - 'CodeBuild Build State Change'
+        detail:
+          build-status:
+            - 'IN_PROGRESS'
+            - 'SUCCEEDED'
+            - 'FAILED'
+            - 'STOPPED'
+      State: 'ENABLED'
+      Targets:
+        -
+          Arn: !GetAtt SlackFunction.Arn
+          Id: 'BuildRuleLambdaTarget'
+        
+  PermissionForBuildEventsToInvokeLambda:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !Ref SlackFunction
+      Action: 'lambda:InvokeFunction'
+      Principal: 'events.amazonaws.com'
+      SourceArn: !GetAtt BuildEventRule.Arn
